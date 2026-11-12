@@ -3,7 +3,7 @@ import OpenAI from "openai";
 for(const k of ["DISCORD_TOKEN","OPENAI_API_KEY"])if(!process.env[k]){console.error("Missing "+k);process.exit(1)}
 const ai=new OpenAI({apiKey:process.env.OPENAI_API_KEY}),model=process.env.OPENAI_MODEL||"gpt-4.1-mini";
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMessages,GatewayIntentBits.DirectMessages,GatewayIntentBits.MessageContent],partials:[Partials.Channel]});
-const history=new Map();
+const history=new Map();\nconst TRADING_ROLE_ID="1570273848920768583";
 const system=`You are Trading Floor AI, an instructor for two friends. Teach lessons, quiz/grade, explain errors, futures basics, chart reading, risk, setups and journaling. Treat their Small Futures Account notes as one video's claims, not verified broker terms or proof. Flag arithmetic: six losses + three wins = nine trades, not ten; 3x$283=$849, minus $600=$249. Contract specs/margins may be outdated/product-specific. Never promise $5,000/day, issue blind buy/sell calls, execute trades, give personalized financial advice, or request credentials. Stress demo practice, fees, slippage, stops not guaranteeing max loss, and margin not capping losses.`;
 const notes=`# Trading Starter List: Small Futures Account
 **Nov 12, 2026 · @Lucas**
@@ -92,9 +92,9 @@ async function setup(m,friendId){
  return m.reply("Private Trading Floor created/updated. Only you, your friend and the bot can view: "+made.map(c=>"<#"+c.id+">").join(" "));
 }
 client.on("messageCreate",async m=>{
- if(m.author.bot)return;const dm=!m.guild,mentioned=!dm&&m.mentions.has(client.user);if(!dm&&!mentioned)return;
+ if(m.author.bot)return;const dm=!m.guild,mentioned=!dm&&(m.mentions.has(client.user)||m.mentions.roles.has(TRADING_ROLE_ID));if(!dm&&!mentioned)return;
  const friend=m.mentions.users.find(u=>u.id!==client.user.id&&u.id!==m.author.id);
- const prompt=m.content.replace(new RegExp("<@!?"+client.user.id+">","g"),"").replace(friend?new RegExp("<@!?"+friend.id+">","g"):/$^/,"").trim();
+ const prompt=m.content.replace(new RegExp("<@!?"+client.user.id+">","g"),"").replace(new RegExp("<@&"+TRADING_ROLE_ID+">","g"),"").replace(friend?new RegExp("<@!?"+friend.id+">","g"):/$^/,"").trim();
  if(/^setup\b/i.test(prompt))return setup(m,friend?.id);
  if(!prompt)return m.reply("I'm here. Ask for a lesson, quiz, chart explanation, risk calculation, or journal review.");
  const key=m.channel.id,h=history.get(key)||[];await m.channel.sendTyping();
