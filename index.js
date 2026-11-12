@@ -163,7 +163,12 @@ async function setupGuild(guild,ownerId,friendId){
  }
  console.log("Created private classroom in "+guild.name+" for owner and @goatbalter.");
 }
-client.once("ready",()=>{console.log("Trading Floor AI online as "+client.user.tag);deliverTradingViewAlerts();});
+client.once("ready",()=>{
+ console.log("Trading Floor AI online as "+client.user.tag);
+ const ch=alertChannel();
+ console.log(ch?"TradingView alerts will post to #"+ch.name+" in "+ch.guild?.name:"TradingView alerts have nowhere to go yet: create a text channel named chart-review.");
+ deliverTradingViewAlerts().catch(e=>console.error("TradingView Discord delivery failed:",e));
+});
 client.on("messageCreate",async m=>{
  if(m.author.bot)return;const dm=!m.guild,mentioned=!dm&&(m.mentions.has(client.user)||m.mentions.roles.has(TRADING_ROLE_ID));if(!dm&&!mentioned)return;
  const prompt=m.content.replace(new RegExp("<@!?"+client.user.id+">","g"),"").replace(new RegExp("<@&"+TRADING_ROLE_ID+">","g"),"").trim();
@@ -175,27 +180,40 @@ client.on("messageCreate",async m=>{
 
 const webhookSecret=process.env.TRADINGVIEW_WEBHOOK_SECRET||"";
 const pendingTradingView=[];
+// Control characters only. (The previous pattern was double-escaped and wiped every digit and capital letter.)
+const clean=(v,n=180)=>String(v??"").replace(/[\x00-\x1F\x7F]/g," ").trim().slice(0,n);
 const httpServer=createServer(async(req,res)=>{
- const send=(code,obj)=>{res.writeHead(code,{"content-type":"application/json","cache-control":"no-store"});res.end(JSON.stringify(obj));};
- if(req.method==="GET"&&req.url==="/health")return send(200,{ok:true,service:"trading-floor-ai",discord:client.isReady()});
- if(req.method!=="POST"||req.url!=="/webhook/tradingview")return send(404,{ok:false,error:"not_found"});
- if(!webhookSecret)return send(503,{ok:false,error:"webhook_not_configured"});
- let raw="";try{for await(const chunk of req){raw+=chunk.toString("utf8");if(raw.length>16000)return send(413,{ok:false,error:"payload_too_large"});}}catch{return send(400,{ok:false,error:"bad_request"});}
- let data;try{data=JSON.parse(raw);}catch{return send(400,{ok:false,error:"invalid_json"});}
- const supplied=typeof data.secret==="string"?Buffer.from(data.secret):Buffer.alloc(0),expected=Buffer.from(webhookSecret);
- if(supplied.length!==expected.length||!timingSafeEqual(supplied,expected))return send(401,{ok:false,error:"unauthorized"});
- const clean=(v,n=180)=>String(v??"").replace(/[\\x00-\\x1F\\x7F]/g," ").slice(0,n);
- const alert={ticker:clean(data.ticker||data.symbol||"Unknown",40),exchange:clean(data.exchange,40),interval:clean(data.interval,20),time:clean(data.time,60),price:clean(data.price||data.close,40),volume:clean(data.volume,40),message:clean(data.message||data.comment||"TradingView alert triggered",500)};
- if(pendingTradingView.length>=100)pendingTradingView.shift();
- pendingTradingView.push(alert);
- await deliverTradingViewAlerts();
- return send(202,{ok:true,queued:true});
+ const send=(code,obj)=>{if(res.headersSent)return;res.writeHead(code,{"content-type":"application/json","cache-control":"no-store"});res.end(JSON.stringify(obj));};
+ try{
+  const path=(req.url||"/").split("?")[0].replace(/\/+$/,"")||"/";
+  if(req.method==="GET"&&path==="/health")return send(200,{ok:true,service:"trading-floor-ai",discord:client.isReady(),webhook:webhookSecret?"configured":"missing TRADINGVIEW_WEBHOOK_SECRET"});
+  if(req.method!=="POST"||path!=="/webhook/tradingview")return send(404,{ok:false,error:"not_found"});
+  if(!webhookSecret)return send(503,{ok:false,error:"webhook_not_configured"});
+  let raw="";try{for await(const chunk of req){raw+=chunk.toString("utf8");if(raw.length>16000)return send(413,{ok:false,error:"payload_too_large"});}}catch{return send(400,{ok:false,error:"bad_request"});}
+  let data;try{data=JSON.parse(raw);}catch{return send(400,{ok:false,error:"invalid_json"});}
+  if(!data||typeof data!=="object"||Array.isArray(data))return send(400,{ok:false,error:"expected_json_object"});
+  const supplied=typeof data.secret==="string"?Buffer.from(data.secret):Buffer.alloc(0),expected=Buffer.from(webhookSecret);
+  if(supplied.length!==expected.length||!timingSafeEqual(supplied,expected))return send(401,{ok:false,error:"unauthorized"});
+  const alert={ticker:clean(data.ticker||data.symbol||"Unknown",40),exchange:clean(data.exchange,40),interval:clean(data.interval,20),time:clean(data.time,60),price:clean(data.price||data.close,40),volume:clean(data.volume,40),message:clean(data.message||data.comment||"TradingView alert triggered",500)};
+  if(pendingTradingView.length>=100)pendingTradingView.shift();
+  pendingTradingView.push(alert);
+  // Answer first: TradingView cancels a webhook that takes longer than 3 seconds. Discord delivery follows.
+  send(202,{ok:true,queued:true});
+  deliverTradingViewAlerts().catch(e=>console.error("TradingView Discord delivery failed:",e));
+ }catch(e){
+  // A bad request must never take the whole bot down.
+  console.error("TradingView webhook error:",e);
+  send(500,{ok:false,error:"server_error"});
+ }
 });
+function alertChannel(){
+ const guild=client.guilds.cache.first();if(!guild)return null;
+ return guild.channels.cache.find(c=>c.type===ChannelType.GuildText&&c.name==="chart-review")||null;
+}
 async function deliverTradingViewAlerts(){
  if(!client.isReady()||!pendingTradingView.length)return;
- const guild=client.guilds.cache.first();if(!guild)return;
- const channel=guild.channels.cache.find(c=>c.type===ChannelType.GuildText&&c.name==="chart-review");
- if(!channel)return;
+ const channel=alertChannel();
+ if(!channel){console.warn("TradingView alert waiting: no #chart-review text channel the bot can see. Create one or check the bot's permissions.");return;}
  while(pendingTradingView.length){
   const a=pendingTradingView[0];
   try{
@@ -208,6 +226,7 @@ async function deliverTradingViewAlerts(){
   }catch(e){console.error("TradingView Discord delivery failed:",e);break;}
  }
 }
-httpServer.listen(Number(process.env.PORT)||3000,"0.0.0.0",()=>console.log("TradingView webhook HTTP server listening"));
+const port=Number(process.env.PORT)||3000;
+httpServer.listen(port,"0.0.0.0",()=>console.log("TradingView webhook HTTP server listening on port "+port+" (Railway's domain must point at this port)"));
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN).catch(e=>{console.error("Discord login failed: "+(e?.message||e)+" (check DISCORD_TOKEN and the intents enabled in the Developer Portal)");process.exit(1);});
