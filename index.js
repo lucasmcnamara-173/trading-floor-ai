@@ -109,9 +109,19 @@ async function setup(m,friendId){
   const parent=cats.get(sectionByChannel.get(name));
   const ch=await m.guild.channels.create({name,type:ChannelType.GuildText,parent:parent.id,topic,permissionOverwrites:perms});
   made.push(ch);
-  for(let i=0;i<content.length;i+=1850)await ch.send((i===0?"<!-- trading-floor-seed-v1 -->\n":"")+content.slice(i,i+1850));
+  for(let i=0;i<content.length;i+=1850)await ch.send((i===0?"<!-- trading-floor-seed-v1 -->\\n":"")+content.slice(i,i+1850));
  }
- return m.reply("Full server rebuild complete. Replaced the old server channels with "+sections.length+" private sections and "+made.length+" channels. Only you, your friend and the bot can view them. Existing roles, members and server settings were left untouched.");
+ const voicePerms=[
+  {id:everyone,deny:[PermissionFlagsBits.ViewChannel]},
+  {id:m.author.id,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.Connect,PermissionFlagsBits.Speak,PermissionFlagsBits.UseVAD,PermissionFlagsBits.Stream]},
+  {id:friendId,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.Connect,PermissionFlagsBits.Speak,PermissionFlagsBits.UseVAD,PermissionFlagsBits.Stream]},
+  {id:client.user.id,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.Connect,PermissionFlagsBits.Speak,PermissionFlagsBits.ManageChannels]}
+ ];
+ const voiceRooms=[["team-room","00 • START HERE"],["study-hall","01 • CLASSROOM"],["live-chart-review","02 • MARKET RESEARCH"]];
+ for(const [name,section] of voiceRooms){
+  await m.guild.channels.create({name,type:ChannelType.GuildVoice,parent:cats.get(section).id,permissionOverwrites:voicePerms});
+ }
+ return m.reply("Full server rebuild complete. Replaced the old server channels with "+sections.length+" private sections, "+made.length+" text channels and "+voiceRooms.length+" private voice channels. Only you, your friend and the bot can view them. Existing roles, members and server settings were left untouched.");
 }
 client.on("messageCreate",async m=>{
  if(m.author.bot)return;const dm=!m.guild,mentioned=!dm&&(m.mentions.has(client.user)||m.mentions.roles.has(TRADING_ROLE_ID));if(!dm&&!mentioned)return;
