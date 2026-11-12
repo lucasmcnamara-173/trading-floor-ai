@@ -1,5 +1,7 @@
 import {Client,GatewayIntentBits,Partials,ChannelType,PermissionFlagsBits} from "discord.js";
 import OpenAI from "openai";
+import {createServer} from "node:http";
+import {timingSafeEqual,randomBytes} from "node:crypto";
 for(const k of ["DISCORD_TOKEN","OPENAI_API_KEY"])if(!process.env[k]){console.error("Missing "+k);process.exit(1)}
 const ai=new OpenAI({apiKey:process.env.OPENAI_API_KEY}),model=process.env.OPENAI_MODEL||"gpt-4.1-mini";
 const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.GuildMembers,GatewayIntentBits.GuildMessages,GatewayIntentBits.DirectMessages,GatewayIntentBits.MessageContent],partials:[Partials.Channel]});
@@ -180,4 +182,42 @@ client.on("messageCreate",async m=>{
  try{const out=await ai.responses.create({model,instructions:system,input:[...h,{role:"user",content:prompt}],max_output_tokens:1200});const answer=(out.output_text||"I could not generate a response.").trim();h.push({role:"user",content:prompt},{role:"assistant",content:answer});history.set(key,h.slice(-24));for(let i=0;i<answer.length;i+=1900)await m.reply(answer.slice(i,i+1900))}
  catch(e){console.error("AI request failed:",e);await m.reply("I hit an error. Check the OpenAI API key and model in Railway variables.")}
 });
+
+const webhookSecret=process.env.TRADINGVIEW_WEBHOOK_SECRET||"";
+const pendingTradingView=[];
+const httpServer=createServer(async(req,res)=>{
+ const send=(code,obj)=>{res.writeHead(code,{"content-type":"application/json","cache-control":"no-store"});res.end(JSON.stringify(obj));};
+ if(req.method==="GET"&&req.url==="/health")return send(200,{ok:true,service:"trading-floor-ai",discord:client.isReady()});
+ if(req.method!=="POST"||req.url!=="/webhook/tradingview")return send(404,{ok:false,error:"not_found"});
+ if(!webhookSecret)return send(503,{ok:false,error:"webhook_not_configured"});
+ let raw="";try{for await(const chunk of req){raw+=chunk.toString("utf8");if(raw.length>16000)return send(413,{ok:false,error:"payload_too_large"});}}catch{return send(400,{ok:false,error:"bad_request"});}
+ let data;try{data=JSON.parse(raw);}catch{return send(400,{ok:false,error:"invalid_json"});}
+ const supplied=typeof data.secret==="string"?Buffer.from(data.secret):Buffer.alloc(0),expected=Buffer.from(webhookSecret);
+ if(supplied.length!==expected.length||!timingSafeEqual(supplied,expected))return send(401,{ok:false,error:"unauthorized"});
+ const clean=(v,n=180)=>String(v??"").replace(/[\\x00-\\x1F\\x7F]/g," ").slice(0,n);
+ const alert={ticker:clean(data.ticker||data.symbol||"Unknown",40),exchange:clean(data.exchange,40),interval:clean(data.interval,20),time:clean(data.time,60),price:clean(data.price||data.close,40),volume:clean(data.volume,40),message:clean(data.message||data.comment||"TradingView alert triggered",500)};
+ if(pendingTradingView.length>=100)pendingTradingView.shift();
+ pendingTradingView.push(alert);
+ await deliverTradingViewAlerts();
+ return send(202,{ok:true,queued:true});
+});
+async function deliverTradingViewAlerts(){
+ if(!client.isReady()||!pendingTradingView.length)return;
+ const guild=client.guilds.cache.first();if(!guild)return;
+ const channel=guild.channels.cache.find(c=>c.type===ChannelType.GuildText&&c.name==="chart-review");
+ if(!channel)return;
+ while(pendingTradingView.length){
+  const a=pendingTradingView[0];
+  try{
+   await channel.send({embeds:[{title:"TradingView Alert",description:a.message,fields:[
+    {name:"Symbol",value:a.ticker,inline:true},{name:"Exchange",value:a.exchange||"—",inline:true},
+    {name:"Timeframe",value:a.interval||"—",inline:true},{name:"Price",value:a.price||"—",inline:true},
+    {name:"Volume",value:a.volume||"—",inline:true},{name:"Alert time",value:a.time||"—",inline:true}
+   ],footer:{text:"Alert only — not a trade instruction or verified fill."},timestamp:new Date().toISOString()}]});
+   pendingTradingView.shift();
+  }catch(e){console.error("TradingView Discord delivery failed:",e);break;}
+ }
+}
+httpServer.listen(Number(process.env.PORT)||3000,"0.0.0.0",()=>console.log("TradingView webhook HTTP server listening"));
+
 client.login(process.env.DISCORD_TOKEN);
