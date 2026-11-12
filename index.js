@@ -81,23 +81,37 @@ client.once("ready",()=>console.log("Trading Floor AI online as "+client.user.ta
 async function setup(m,friendId){
  if(!m.guild)return m.reply("Run setup inside your server.");
  if(!m.member.permissions.has(PermissionFlagsBits.ManageChannels))return m.reply("You need Manage Channels permission.");
- if(!friendId||friendId===m.author.id||!/^\d{17,20}$/.test(friendId))return m.reply("Use: @Trading Floor AI setup @yourfriend — mention your friend so I can make the classroom visible only to you two and the bot.");
- const everyone=m.guild.roles.everyone.id, perms=[{id:everyone,deny:[PermissionFlagsBits.ViewChannel]},{id:m.author.id,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.AttachFiles,PermissionFlagsBits.EmbedLinks]},{id:friendId,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.AttachFiles,PermissionFlagsBits.EmbedLinks]},{id:client.user.id,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.ManageChannels,PermissionFlagsBits.EmbedLinks]}];
+ if(!friendId||friendId===m.author.id||!/^[0-9]{17,20}$/.test(friendId))return m.reply("Use: @Trading Floor AI setup @yourfriend — mention your friend so I can make the server private to you two and the bot.");
+ const everyone=m.guild.roles.everyone.id;
+ const perms=[
+  {id:everyone,deny:[PermissionFlagsBits.ViewChannel]},
+  {id:m.author.id,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.AttachFiles,PermissionFlagsBits.EmbedLinks]},
+  {id:friendId,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.AttachFiles,PermissionFlagsBits.EmbedLinks]},
+  {id:client.user.id,allow:[PermissionFlagsBits.ViewChannel,PermissionFlagsBits.SendMessages,PermissionFlagsBits.ReadMessageHistory,PermissionFlagsBits.ManageChannels,PermissionFlagsBits.EmbedLinks]}
+ ];
  await m.guild.channels.fetch();
- let cat=m.guild.channels.cache.find(c=>c.type===ChannelType.GuildCategory&&c.name==="TRADING FLOOR");
- if(!cat)cat=await m.guild.channels.create({name:"TRADING FLOOR",type:ChannelType.GuildCategory,permissionOverwrites:perms});else await cat.permissionOverwrites.set(perms);
- const made=[];
- // Remove every old text channel inside this classroom category except the current approved channel set.
- const keep=new Set(plan.map(x=>x[0]));
- for(const old of m.guild.channels.cache.filter(ch=>ch.type===ChannelType.GuildText&&ch.parentId===cat.id&&!keep.has(ch.name)).values())await old.delete("Consolidate Trading Floor into the current private classroom layout");
- for(const [name,topic,content] of plan){
-  let ch=m.guild.channels.cache.find(c=>c.type===ChannelType.GuildText&&c.name===name);
-  if(!ch)ch=await m.guild.channels.create({name,type:ChannelType.GuildText,parent:cat.id,topic,permissionOverwrites:perms});
-  else{await ch.permissionOverwrites.set(perms);if(ch.parentId!==cat.id)await ch.setParent(cat.id);await ch.setTopic(topic)}
-  made.push(ch);const recent=await ch.messages.fetch({limit:10}).catch(()=>null);
-  if(!recent?.some(x=>x.author.id===client.user.id&&x.content.includes("<!-- trading-floor-seed-v1 -->"))){for(let i=0;i<content.length;i+=1850)await ch.send((i===0?"<!-- trading-floor-seed-v1 -->\n":"")+content.slice(i,i+1850))}
+ // Full-server rebuild: remove every existing channel/category, but leave roles, members, server settings and integrations untouched.
+ for(const ch of [...m.guild.channels.cache.values()].sort((a,b)=>b.rawPosition-a.rawPosition)){
+  if(ch.deletable) await ch.delete("Rebuild entire server as the private Trading Floor classroom");
  }
- return m.reply("Private Trading Floor created/updated. Only you, your friend and the bot can view: "+made.map(c=>"<#"+c.id+">").join(" "));
+ const sections=[
+  {name:"00 • START HERE",channels:["start-here","team-huddle"]},
+  {name:"01 • CLASSROOM",channels:["lessons"]},
+  {name:"02 • MARKET RESEARCH",channels:["strategy-lab","chart-review","resources"]},
+  {name:"03 • RISK MANAGEMENT",channels:["risk-desk"]},
+  {name:"04 • JOURNAL & PERFORMANCE",channels:["trade-journal","weekly-review"]}
+ ];
+ const sectionByChannel=new Map();
+ for(const s of sections)for(const n of s.channels)sectionByChannel.set(n,s.name);
+ const cats=new Map(),made=[];
+ for(const s of sections)cats.set(s.name,await m.guild.channels.create({name:s.name,type:ChannelType.GuildCategory,permissionOverwrites:perms}));
+ for(const [name,topic,content] of plan){
+  const parent=cats.get(sectionByChannel.get(name));
+  const ch=await m.guild.channels.create({name,type:ChannelType.GuildText,parent:parent.id,topic,permissionOverwrites:perms});
+  made.push(ch);
+  for(let i=0;i<content.length;i+=1850)await ch.send((i===0?"<!-- trading-floor-seed-v1 -->\n":"")+content.slice(i,i+1850));
+ }
+ return m.reply("Full server rebuild complete. Replaced the old server channels with "+sections.length+" private sections and "+made.length+" channels. Only you, your friend and the bot can view them. Existing roles, members and server settings were left untouched.");
 }
 client.on("messageCreate",async m=>{
  if(m.author.bot)return;const dm=!m.guild,mentioned=!dm&&(m.mentions.has(client.user)||m.mentions.roles.has(TRADING_ROLE_ID));if(!dm&&!mentioned)return;
