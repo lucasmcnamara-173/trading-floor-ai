@@ -165,6 +165,7 @@ async function setupGuild(guild,ownerId,friendId){
 }
 client.once("ready",async()=>{
  console.log("Trading Floor AI online as "+client.user.tag);
+ deliverTradingViewAlerts();
  for(const guild of client.guilds.cache.values()){
   try{
    await guild.members.fetch();
