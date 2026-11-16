@@ -244,7 +244,7 @@ async function massiveGet(path){
 }
 async function activeContract(product){
  const date=new Date().toISOString().slice(0,10);
- const q=new URLSearchParams({product_code:product,date,active:"true",type:"single",limit:"20",sort:"days_to_maturity.asc"});
+ const q=new URLSearchParams({product_code:product,date,active:"true",type:"single",limit:"100",sort:"ticker.asc"});
  const data=await massiveGet("/contracts?"+q.toString());
  const rows=Array.isArray(data.results)?data.results:[];
  const valid=rows.filter(x=>x.ticker&&Number(x.days_to_maturity)>=0)
