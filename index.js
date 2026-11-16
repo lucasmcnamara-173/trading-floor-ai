@@ -168,6 +168,7 @@ client.once("ready",()=>{
  const ch=alertChannel();
  console.log(ch?"TradingView alerts will post to #"+ch.name+" in "+ch.guild?.name:"TradingView alerts have nowhere to go yet: create a text channel named chart-review.");
  deliverTradingViewAlerts().catch(e=>console.error("TradingView Discord delivery failed:",e));
+ if(massiveKey){console.log("Massive futures monitor enabled (data delay depends on plan).");setTimeout(()=>pollMassive().catch(console.error),15000);setInterval(()=>pollMassive().catch(console.error),70000);}else{console.warn("MASSIVE_API_KEY missing; futures monitor disabled.");}
 });
 client.on("messageCreate",async m=>{
  if(m.author.bot)return;const dm=!m.guild,mentioned=!dm&&(m.mentions.has(client.user)||m.mentions.roles.has(TRADING_ROLE_ID));if(!dm&&!mentioned)return;
@@ -226,6 +227,112 @@ async function deliverTradingViewAlerts(){
   }catch(e){console.error("TradingView Discord delivery failed:",e);break;}
  }
 }
+
+/* Massive futures market-data monitor.
+   Basic plan is 8-hour historical, not live. Polls MNQ/MES minute bars for educational
+   structure review only; it never places orders or emits trade instructions. */
+const massiveKey=process.env.MASSIVE_API_KEY||"";
+const marketState={contracts:{},bars:{MNQ:[],MES:[]},lastPublished:0,lastBarKey:"",lastError:null,lastSuccess:null};
+const massiveBase="https://api.massive.com/futures/v1";
+async function massiveGet(path){
+ const url=new URL(massiveBase+path);url.searchParams.set("apiKey",massiveKey);
+ const response=await fetch(url,{headers:{accept:"application/json"},signal:AbortSignal.timeout(15000)});
+ const body=await response.json().catch(()=>({}));
+ if(!response.ok)throw new Error("Massive HTTP "+response.status+": "+clean(body.error||body.message||body.status||"request failed",180));
+ if(body.status==="ERROR"||body.error)throw new Error(clean(body.error||body.message||"Massive API error",180));
+ return body;
+}
+async function activeContract(product){
+ const date=new Date().toISOString().slice(0,10);
+ const q=new URLSearchParams({product_code:product,date,active:"true",type:"single",limit:"20",sort:"days_to_maturity.asc"});
+ const data=await massiveGet("/contracts?"+q.toString());
+ const rows=Array.isArray(data.results)?data.results:[];
+ const valid=rows.filter(x=>x.ticker&&Number(x.days_to_maturity)>=0)
+   .sort((a,b)=>Number(a.days_to_maturity)-Number(b.days_to_maturity));
+ if(!valid.length)throw new Error("No active "+product+" contract returned for "+date);
+ return valid[0].ticker;
+}
+async function loadBars(product){
+ let ticker=marketState.contracts[product];
+ if(!ticker){ticker=await activeContract(product);marketState.contracts[product]=ticker;console.log("Massive contract selected",product,ticker);}
+ const q=new URLSearchParams({resolution:"1min",limit:"500",sort:"window_start.desc"});
+ const data=await massiveGet("/aggs/"+encodeURIComponent(ticker)+"?"+q.toString());
+ const rows=(Array.isArray(data.results)?data.results:[]).filter(x=>Number.isFinite(Number(x.open))&&Number.isFinite(Number(x.high))&&Number.isFinite(Number(x.low))&&Number.isFinite(Number(x.close)))
+   .map(x=>({t:Number(x.window_start),o:Number(x.open),h:Number(x.high),l:Number(x.low),c:Number(x.close),v:Number(x.volume||0)}))
+   .sort((a,b)=>a.t-b.t);
+ if(rows.length)marketState.bars[product]=rows;
+ return rows;
+}
+function aggregateBars(bars,minutes){
+ const span=minutes*60*1e9,out=[];
+ for(const b of bars){
+  const start=Math.floor(b.t/span)*span,last=out[out.length-1];
+  if(!last||last.t!==start)out.push({t:start,o:b.o,h:b.h,l:b.l,c:b.c,v:b.v});
+  else{last.h=Math.max(last.h,b.h);last.l=Math.min(last.l,b.l);last.c=b.c;last.v+=b.v;}
+ }
+ return out;
+}
+function structureSummary(bars){
+ if(bars.length<20)return {bias:"Insufficient bars",detail:"Need at least 20 candles"};
+ const recent=bars.slice(-80),pivots=[];
+ for(let i=2;i<recent.length-2;i++){
+  const b=recent[i];
+  if(b.h>recent[i-1].h&&b.h>recent[i-2].h&&b.h>=recent[i+1].h&&b.h>=recent[i+2].h)pivots.push({i,kind:"high",price:b.h});
+  if(b.l<recent[i-1].l&&b.l<recent[i-2].l&&b.l<=recent[i+1].l&&b.l<=recent[i+2].l)pivots.push({i,kind:"low",price:b.l});
+ }
+ const highs=pivots.filter(p=>p.kind==="high"),lows=pivots.filter(p=>p.kind==="low");
+ const last=recent[recent.length-1],prevHigh=highs.at(-1),prevLow=lows.at(-1);
+ const prior=recent.slice(-21,-1);
+ const sweptHigh=prior.length>0&&last.h>Math.max(...prior.map(x=>x.h))&&last.c<Math.max(...prior.map(x=>x.h));
+ const sweptLow=prior.length>0&&last.l<Math.min(...prior.map(x=>x.l))&&last.c>Math.min(...prior.map(x=>x.l));
+ const brokenHigh=!!prevHigh&&last.c>prevHigh.price,brokenLow=!!prevLow&&last.c<prevLow.price;
+ const gaps=[];
+ for(let i=Math.max(2,recent.length-12);i<recent.length;i++){
+  const a=recent[i-2],c=recent[i];
+  if(c.l>a.h)gaps.push("Bullish FVG "+a.h.toFixed(2)+"–"+c.l.toFixed(2));
+  if(c.h<a.l)gaps.push("Bearish FVG "+c.h.toFixed(2)+"–"+a.l.toFixed(2));
+ }
+ const bias=brokenHigh?"Bullish structure break":brokenLow?"Bearish structure break":last.c>recent[0].o?"Up / unconfirmed":"Down / unconfirmed";
+ return {bias,price:last.c,sweep:sweptHigh?"Prior local highs swept":sweptLow?"Prior local lows swept":"No clear 20-bar sweep",structure:brokenHigh?"Close above last confirmed swing high":brokenLow?"Close below last confirmed swing low":"No confirmed swing break on latest close",fvg:gaps.at(-1)||"No recent 3-candle FVG detected",lastBar:last.t};
+}
+function marketReport(){
+ const a=marketState.bars.MNQ,b=marketState.bars.MES;
+ if(!a.length||!b.length)return null;
+ const lines=[];
+ for(const [product,bars] of [["MNQ",a],["MES",b]]){
+  const m1=structureSummary(bars),m5=structureSummary(aggregateBars(bars,5)),m15=structureSummary(aggregateBars(bars,15)),h1=structureSummary(aggregateBars(bars,60));
+  lines.push("**"+product+"** · "+marketState.contracts[product]+" · last close "+(m1.price??"n/a"));
+  lines.push("1m: "+m1.bias+" | "+m1.sweep+" | "+m1.structure);
+  lines.push("5m: "+m5.bias+" | "+m5.structure+" | "+m5.fvg);
+  lines.push("15m: "+m15.bias+" | "+m15.structure+" | "+m15.fvg);
+  lines.push("1h: "+h1.bias+" | "+h1.structure);
+ }
+ const time=new Date().toISOString();
+ return {description:lines.join("\n").slice(0,3900),time};
+}
+async function pollMassive(){
+ if(!massiveKey||!client.isReady())return;
+ try{
+  // Two aggregate requests per cycle; contract metadata is cached for this process.
+  await loadBars("MNQ");
+  await loadBars("MES");
+  marketState.lastSuccess=new Date().toISOString();marketState.lastError=null;
+  const report=marketReport();if(!report)return;
+  const key=[marketState.bars.MNQ.at(-1)?.t,marketState.bars.MES.at(-1)?.t].join(":");
+  const now=Date.now();
+  if(key!==marketState.lastBarKey&&now-marketState.lastPublished>=15*60*1000){
+   const channel=alertChannel();
+   if(channel){
+    await channel.send({embeds:[{title:"MNQ / MES — delayed SMC structure monitor",description:report.description,fields:[
+     {name:"Data timing",value:"Massive Futures Basic: 8-hour historical/delayed bars. Not live market data.",inline:false},
+     {name:"Method limits",value:"Mechanical candle checks only. A detected sweep, structure break or FVG is not a validated setup or entry signal.",inline:false}
+    ],footer:{text:"Education only · verify chart/session · no orders are placed"},timestamp:report.time}]});
+    marketState.lastPublished=now;marketState.lastBarKey=key;
+   }
+  }
+ }catch(e){marketState.lastError=clean(e?.message||e,220);console.error("Massive futures monitor:",marketState.lastError);}
+}
+
 const port=Number(process.env.PORT)||3000;
 httpServer.listen(port,"0.0.0.0",()=>console.log("TradingView webhook HTTP server listening on port "+port+" (Railway's domain must point at this port)"));
 
